@@ -259,7 +259,7 @@ class Window(Adw.ApplicationWindow):
         for attr, title, desc, fn in (
                 ("sw_bg", "Collect in background", "Checks the journal every 15 minutes, even when this window is closed",
                  integration.set_background),
-                ("sw_menu", "Add to app menu", "Creates a launcher entry for this app", integration.set_menu_entry)):
+                ("sw_menu", "Add to app menu", "Copies the app to ~/.local/share/relmon/app and adds a launcher", integration.set_menu_entry)):
             row = Adw.SwitchRow(title=title, subtitle=desc); row.desc = desc
             row.connect("notify::active", self.on_setup, fn)
             setattr(self, attr, row); lb.append(row)
