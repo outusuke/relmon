@@ -6,6 +6,8 @@ crashes, kernel/hardware errors (OOM, GPU, disk, thermal), failed services and u
 
 Works on any systemd distribution. No distro-specific code.
 
+![relmon window](docs/screenshot.png)
+
 ## Features
 - Daily score chart, per-category and per-day filtering, search with "show more"
 - Journal context (±30 s) for each event, copy as a Markdown bug report
