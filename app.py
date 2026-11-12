@@ -79,7 +79,16 @@ class Window(Adw.ApplicationWindow):
         top = Gtk.Overlay(child=self.meta); top.add_overlay(btns)
         self.cur = None   # (detail dict, ts, journal lines or None) of the open event
         self.detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, visible=False)
+        fbar = Gtk.Box(spacing=6, margin_start=12, margin_end=12, margin_top=4, margin_bottom=4)
+        self.f_err = Gtk.ToggleButton(label="Warnings and errors", tooltip_text="Hide info and debug lines")
+        self.f_unit = Gtk.ToggleButton(label="Same unit / PID", tooltip_text="Only lines from the event's unit or process")
+        self.f_wrap = Gtk.ToggleButton(label="Wrap lines")
+        self.log_info = Gtk.Label(css_classes=["dim-label"], hexpand=True, xalign=1)
+        for b in (self.f_err, self.f_unit, self.f_wrap):
+            b.connect("toggled", lambda _: self.render_log()); fbar.append(b)
+        fbar.append(self.log_info)
         self.detail.append(top)
+        self.detail.append(fbar)
         self.detail.append(Gtk.ScrolledWindow(child=self.log, vexpand=True, min_content_height=160))
         paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, resize_end_child=True,
                           shrink_end_child=False, start_child=Gtk.ScrolledWindow(child=self.stack),
@@ -223,6 +232,8 @@ class Window(Adw.ApplicationWindow):
         if not d: return
         b, boot = d["boot_id"], boot_label(d)
         self.cur = (d, ts, None); self.copy_btn.set_sensitive(False)
+        can = bool(d["unit"] or d["pid"]); self.f_unit.set_sensitive(can)
+        if not can: self.f_unit.set_active(False)
         self.meta.set_text(f"{d['source']}   {datetime.fromtimestamp(ts):%Y-%m-%d %H:%M:%S}\n"
                            f"{(d['message'] or '')[:500]}\n"
                            f"Unit: {d['unit'] or '-'}    PID: {d['pid'] or '-'}    Boot: {boot}")
@@ -237,17 +248,26 @@ class Window(Adw.ApplicationWindow):
     def show_log(self, key, lines, err):
         if key != self.sel: return
         self.cur = (self.cur[0], self.cur[1], lines); self.copy_btn.set_sensitive(True)
-        buf = self.log.get_buffer(); buf.set_text("")
-        if err: buf.set_text(err); return
-        mark = None
-        for prio, text, hit in lines:
+        if err: self.log.get_buffer().set_text(err); self.log_info.set_text(""); return
+        self.render_log()
+
+    def render_log(self):
+        """Draw the open event's journal lines through the filter toggles."""
+        if not self.cur or self.cur[2] is None: return
+        d, lines = self.cur[0], self.cur[2]
+        same = self.f_unit.get_active()
+        kept = collector.filter_lines(lines, self.f_err.get_active(), d["unit"] if same else None, d["pid"] if same else None)
+        self.log_info.set_text(f"{len(kept)} of {len(lines)} lines")
+        self.log.set_wrap_mode(Gtk.WrapMode.WORD_CHAR if self.f_wrap.get_active() else Gtk.WrapMode.NONE)
+        buf = self.log.get_buffer(); buf.set_text(""); mark = None
+        for l in collector.collapse(kept):
             start = buf.get_end_iter().get_offset()
-            buf.insert(buf.get_end_iter(), text + "\n")
-            tags = ["err" if prio <= 3 else "warn" if prio == 4 else "dim" if prio >= 7 else None,
-                    "event" if hit else None]
+            buf.insert(buf.get_end_iter(), collector.display_line(l) + "\n")
+            tags = ["err" if l.prio <= 3 else "warn" if l.prio == 4 else "dim" if l.prio >= 7 else None,
+                    "event" if l.hit else None]
             for tag in filter(None, tags):
                 buf.apply_tag_by_name(tag, buf.get_iter_at_offset(start), buf.get_end_iter())
-            if hit and mark is None: mark = buf.create_mark(None, buf.get_iter_at_offset(start), True)
+            if l.hit and mark is None: mark = buf.create_mark(None, buf.get_iter_at_offset(start), True)
         if mark:  # scroll to the event once the text has been laid out
             GLib.idle_add(lambda: self.log.scroll_to_mark(mark, 0.0, True, 0.0, 0.3) and False)
 

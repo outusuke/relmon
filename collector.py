@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Reads journal errors + coredumps into SQLite. Run: python collector.py [--follow]"""
 import fcntl, hashlib, json, os, platform, subprocess, sys, time
+from collections import namedtuple
 from datetime import datetime
 from core import report, connect, fingerprint, prune, retention_cutoff, new_alerts, classify, parse_failed, DB_PATH
 
@@ -22,6 +23,10 @@ def _journal(args):
     return r.stdout if r.returncode == 0 else None
 
 
+STAMP_W = 13   # width of "HH:MM:SS.mmm " at the start of a display line
+LogLine = namedtuple("LogLine", "prio text hit rel unit pid body n")   # rel = seconds from the event, n = repeat count
+
+
 def context_args(ts, boot=None, window=30, limit=5000):   # safety cap; window_slice() trims to 300
     f = lambda t: datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")   # journalctl reads local time
     a = ["journalctl", "--no-pager", "-o", "json", "--since", f(ts - window), "--until", f(ts + window),
@@ -30,7 +35,7 @@ def context_args(ts, boot=None, window=30, limit=5000):   # safety cap; window_s
 
 
 def format_entry(e):
-    """Journal JSON entry -> (timestamp, priority 0..7, display line)."""
+    """Journal JSON entry -> (timestamp, priority 0..7, display line, unit, pid)."""
     m = e.get("MESSAGE")
     if isinstance(m, list):  # journald encodes binary messages as byte arrays
         try:
@@ -45,7 +50,9 @@ def format_entry(e):
         prio = int(e.get("PRIORITY", 6))
     except (TypeError, ValueError):
         prio = 6
-    return ts, prio, f"{datetime.fromtimestamp(ts):%H:%M:%S.%f}"[:-3] + f" {src}" + (f"[{pid}]" if pid else "") + f": {m}"
+    unit = e.get("_SYSTEMD_UNIT") or e.get("_SYSTEMD_USER_UNIT") or e.get("UNIT")
+    return (ts, prio, f"{datetime.fromtimestamp(ts):%H:%M:%S.%f}"[:-3] + f" {src}" + (f"[{pid}]" if pid else "") + f": {m}",
+            unit, pid)
 
 
 def window_slice(items, ts, limit=300):
@@ -60,7 +67,7 @@ def window_slice(items, ts, limit=300):
 
 def context_lines(ts, boot=None, window=30):
     """Journal lines (all priorities) within +-window s of ts.
-    Returns (lines, error); lines = [(priority, text, is_the_event)], one of the two is None."""
+    Returns (lines, error); lines = [LogLine], one of the two is None."""
     try:
         r = subprocess.run(context_args(ts, boot, window), capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -70,12 +77,45 @@ def context_lines(ts, boot=None, window=30):
     items = []
     for raw in r.stdout.splitlines():
         try:
-            t, prio, text = format_entry(json.loads(raw))
+            t, prio, text, unit, pid = format_entry(json.loads(raw))
         except ValueError:
             continue
-        items.append((t, prio, text, abs(t - ts) < 0.0005))
-    lines = [(p, x, h) for _, p, x, h in window_slice(items, ts)]
+        items.append((t, prio, text, abs(t - ts) < 0.0005, unit, pid))
+    lines = [LogLine(p, x, h, t - ts, u, pid and str(pid), x[STAMP_W:], 1) for t, p, x, h, u, pid in window_slice(items, ts)]
     return lines or None, (None if lines else "No journal lines in this window (the journal may have rotated).")
+
+
+def filter_lines(lines, errors_only=False, unit=None, pid=None):
+    """Lines for the log view. The event line is always kept; errors_only keeps warnings and worse;
+    unit/pid keep only lines from that unit or process."""
+    out = []
+    for l in lines:
+        if not l.hit:
+            if errors_only and l.prio > 4:
+                continue
+            if (unit or pid) and not ((unit and l.unit == unit) or (pid and l.pid == str(pid))):
+                continue
+        out.append(l)
+    return out
+
+
+def collapse(lines):
+    """Merge consecutive identical lines into one with a repeat count; the event line is never merged."""
+    out = []
+    for l in lines:
+        p = out[-1] if out else None
+        if p and not l.hit and not p.hit and (p.prio, p.body) == (l.prio, l.body):
+            out[-1] = p._replace(n=p.n + 1)
+        else:
+            out.append(l)
+    return out
+
+
+def display_line(l):
+    """One log line as shown in the UI: severity word (not just colour), time from the event, message."""
+    tag = "ERR " if l.prio <= 3 else "WARN" if l.prio == 4 else "    "
+    rel = "event" if l.hit else f"{l.rel:+.1f}s"
+    return f"{tag} {rel:>7} {l.body}" + (f"  \u00d7{l.n}" if l.n > 1 else "")
 
 
 def collect_journal(db):

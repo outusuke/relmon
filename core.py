@@ -290,7 +290,7 @@ def event_markdown(d, ts, lines=None):
            f"- **Kernel:** {d['kernel'] or '?'}", "",
            "**Message:**", f, msg, f]
     if lines:
-        body = "\n".join((">> " if hit else "   ") + text for _, text, hit in lines)
+        body = "\n".join((">> " if hit else "   ") + text for _, text, hit, *_rest in lines)
         f = _fence(body)
         out += ["", "**Journal (±30 s, `>>` marks the event):**", f, body, f]
     else:
