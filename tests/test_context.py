@@ -53,4 +53,8 @@ rows = display_line(M("\n".join(f"r{i}" for i in range(10)))).split("\n")
 assert len(rows) == 7 and rows[1] == " " * 13 + "r1" and rows[-1] == " " * 13 + "\u2026 4 more lines"   # folded, indented
 assert len(display_line(M("\n".join(f"r{i}" for i in range(10)), hit=True)).split("\n")) == 10   # the event is shown whole
 assert len(display_line(M("x" * 1000))) < 400 and len(display_line(M("x" * 1000, hit=True))) > 1000
+assert display_line(M("a\n\nb\n   \nc")).split("\n")[1:] == [" " * 13 + "b", " " * 13 + "c"]   # blank rows dropped
+rows = display_line(M("\n\n".join(f"r{i}" for i in range(7)))).split("\n")
+assert len(rows) == 7 and rows[-1] == " " * 13 + "\u2026 1 more line"           # blanks don't count towards the fold
+assert display_line(M("")).strip() == "+0ms"                                      # an empty message still shows its line
 print("context ok")

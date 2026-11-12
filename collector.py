@@ -146,8 +146,10 @@ def display_line(l):
     head = f"{tag} {rel:>7} "
     rows = l.body.split("\n")
     if not l.hit:
+        rows = [r for r in rows if r.strip()] or rows[:1]   # blank rows would use up the visible ones
         if len(rows) > MAX_ROWS:
-            rows = rows[:MAX_ROWS] + [f"\u2026 {len(rows) - MAX_ROWS} more lines"]
+            n = len(rows) - MAX_ROWS
+            rows = rows[:MAX_ROWS] + [f"\u2026 {n} more line" + ("s" if n > 1 else "")]
         rows = [r if len(r) <= MAX_COLS else r[:MAX_COLS] + "\u2026" for r in rows]
     return head + ("\n" + " " * len(head)).join(rows) + (f"  \u00d7{l.n}" if l.n > 1 else "")
 
