@@ -26,6 +26,8 @@ def _journal(args):
 GENERIC_UNITS = {"init.scope", "system.slice", "user.slice", "-.slice"}   # name nothing in particular
 GENERIC_SOURCES = {"systemd", "kernel", "audit", "unknown", "?"}           # every line of these would match
 UNIT_RE = re.compile(r"[\w@:\\.-]+?\.(?:service|socket|timer|mount|automount|path|swap|target|device)\b")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")   # terminal colour codes some apps log
+MAX_ROWS, MAX_COLS = 6, 300   # fold longer messages / cut longer lines in the log view (the event itself is never cut)
 STAMP_W = 13   # width of "HH:MM:SS.mmm " at the start of a display line
 LogLine = namedtuple("LogLine", "prio text hit rel unit pid body n")   # rel = seconds from the event, n = repeat count
 
@@ -45,7 +47,7 @@ def format_entry(e):
             m = bytes(m).decode("utf-8", "replace")
         except (TypeError, ValueError):
             m = str(m)
-    m = "" if m is None else str(m)
+    m = ANSI_RE.sub("", "" if m is None else str(m)).rstrip()
     ts = int(e.get("__REALTIME_TIMESTAMP", 0)) / 1e6
     src = e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or "?"
     pid = e.get("_PID")
@@ -137,10 +139,17 @@ def collapse(lines):
 
 
 def display_line(l):
-    """One log line as shown in the UI: severity word (not just colour), time from the event, message."""
+    """One log line as shown in the UI: severity word (not just colour), time from the event, message.
+    Continuation lines (stack traces) are indented under the message; long ones are folded or cut."""
     tag = "ERR " if l.prio <= 3 else "WARN" if l.prio == 4 else "    "
     rel = "event" if l.hit else f"{l.rel * 1000:+.0f}ms" if abs(l.rel) < 1 else f"{l.rel:+.1f}s"
-    return f"{tag} {rel:>7} {l.body}" + (f"  \u00d7{l.n}" if l.n > 1 else "")
+    head = f"{tag} {rel:>7} "
+    rows = l.body.split("\n")
+    if not l.hit:
+        if len(rows) > MAX_ROWS:
+            rows = rows[:MAX_ROWS] + [f"\u2026 {len(rows) - MAX_ROWS} more lines"]
+        rows = [r if len(r) <= MAX_COLS else r[:MAX_COLS] + "\u2026" for r in rows]
+    return head + ("\n" + " " * len(head)).join(rows) + (f"  \u00d7{l.n}" if l.n > 1 else "")
 
 
 def collect_journal(db):

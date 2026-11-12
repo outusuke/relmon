@@ -45,4 +45,12 @@ q = shlex.split(journalctl_command(t0)); assert "-b" not in q and "-p" not in q 
 d = dict(category="oom", source="kernel", message="m", unit=None, pid=None, boot_id=None, boot_start=None, kernel=None)
 assert "\u00b1120 s" in event_markdown(d, t0, [L(6, "a"), L(3, "EV", hit=True)], 120)
 assert "\u00b130 s" in event_markdown(d, t0, [L(6, "a")])
+
+r = format_entry({"__REALTIME_TIMESTAMP": "1700000000000000", "MESSAGE": "\x1b[2m2026\x1b[0m \x1b[32m INFO\x1b[0m hi\n", "SYSLOG_IDENTIFIER": "x"})
+assert r[2].endswith("x: 2026  INFO hi")                    # colour codes and trailing newline gone
+M = lambda body, hit=False: LogLine(6, "t", hit, 0.0, None, None, body, 1)
+rows = display_line(M("\n".join(f"r{i}" for i in range(10)))).split("\n")
+assert len(rows) == 7 and rows[1] == " " * 13 + "r1" and rows[-1] == " " * 13 + "\u2026 4 more lines"   # folded, indented
+assert len(display_line(M("\n".join(f"r{i}" for i in range(10)), hit=True)).split("\n")) == 10   # the event is shown whole
+assert len(display_line(M("x" * 1000))) < 400 and len(display_line(M("x" * 1000, hit=True))) > 1000
 print("context ok")
