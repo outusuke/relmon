@@ -277,8 +277,9 @@ def _fence(text):
     return f
 
 
-def event_markdown(d, ts, lines=None):
-    """Bug-report Markdown for an event_detail() dict. lines: [(prio, text, is_event)] or None."""
+def event_markdown(d, ts, lines=None, window=30):
+    """Bug-report Markdown for an event_detail() dict. lines: [(prio, text, is_event, ...)] or None;
+    window: seconds of journal context either side of the event."""
     msg = d["message"] or ""
     f = _fence(msg)
     out = [f"### {d['source']}",
@@ -292,7 +293,7 @@ def event_markdown(d, ts, lines=None):
     if lines:
         body = "\n".join((">> " if hit else "   ") + text for _, text, hit, *_rest in lines)
         f = _fence(body)
-        out += ["", "**Journal (±30 s, `>>` marks the event):**", f, body, f]
+        out += ["", f"**Journal (±{window} s, `>>` marks the event):**", f, body, f]
     else:
         out += ["", "_Journal lines unavailable._"]
     return "\n".join(out) + "\n"

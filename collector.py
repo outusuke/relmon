@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Reads journal errors + coredumps into SQLite. Run: python collector.py [--follow]"""
-import fcntl, hashlib, json, os, platform, subprocess, sys, time
+import fcntl, hashlib, json, os, platform, shlex, subprocess, sys, time
 from collections import namedtuple
 from datetime import datetime
 from core import report, connect, fingerprint, prune, retention_cutoff, new_alerts, classify, parse_failed, DB_PATH
@@ -53,6 +53,15 @@ def format_entry(e):
     unit = e.get("_SYSTEMD_UNIT") or e.get("_SYSTEMD_USER_UNIT") or e.get("UNIT")
     return (ts, prio, f"{datetime.fromtimestamp(ts):%H:%M:%S.%f}"[:-3] + f" {src}" + (f"[{pid}]" if pid else "") + f": {m}",
             unit, pid)
+
+
+def journalctl_command(ts, boot=None, window=30, warnings=False):
+    """Shell command that shows the same journal window in a terminal."""
+    f = lambda t: datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S")   # journalctl reads local time
+    a = ["journalctl", "--no-pager", "--since", f(ts - window), "--until", f(ts + window)]
+    if warnings: a += ["-p", "4"]
+    if boot: a += ["-b", boot]
+    return shlex.join(a)
 
 
 def window_slice(items, ts, limit=300):

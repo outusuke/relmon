@@ -13,6 +13,7 @@ from core import (connect, daily_scores, score_inputs, mute, unmute, muted_rows,
                   score_rgb, step_index, chart_summary)
 
 LABEL_H = 16   # px reserved under the bars for day labels
+WINDOWS = (10, 30, 120)   # seconds of journal either side of an event; index = log window dropdown
 
 CATS = [("all", "All events"), ("panic", "Panics"), ("crash", "App crashes"),
         ("oom", "Out of memory"), ("disk", "Disk / filesystem"),
@@ -84,9 +85,16 @@ class Window(Adw.ApplicationWindow):
         self.f_unit = Gtk.ToggleButton(label="Same unit / PID", tooltip_text="Only lines from the event's unit or process")
         self.f_wrap = Gtk.ToggleButton(label="Wrap lines")
         self.log_info = Gtk.Label(css_classes=["dim-label"], hexpand=True, xalign=1)
+        self.f_win = named(Gtk.DropDown(model=Gtk.StringList.new(["±10 s", "±30 s", "±2 min"]), selected=1,
+                                        tooltip_text="Journal time window around the event"), "Journal time window")
+        self.f_win.connect("notify::selected", lambda *_: self.cur and self.load_log())
+        self.copy_cmd = named(Gtk.Button(icon_name="utilities-terminal-symbolic", css_classes=["flat"],
+                                         tooltip_text="Copy journalctl command"), "Copy journalctl command")
+        self.copy_cmd.connect("clicked", self.copy_command)
+        fbar.append(self.f_win)
         for b in (self.f_err, self.f_unit, self.f_wrap):
             b.connect("toggled", lambda _: self.render_log()); fbar.append(b)
-        fbar.append(self.log_info)
+        fbar.append(self.log_info); fbar.append(self.copy_cmd)
         self.detail.append(top)
         self.detail.append(fbar)
         self.detail.append(Gtk.ScrolledWindow(child=self.log, vexpand=True, min_content_height=160))
@@ -230,24 +238,31 @@ class Window(Adw.ApplicationWindow):
     def show_detail(self, fp, ts):
         d = event_detail(self.db, fp, ts)
         if not d: return
-        b, boot = d["boot_id"], boot_label(d)
+        boot = boot_label(d)
         self.cur = (d, ts, None); self.copy_btn.set_sensitive(False)
         can = bool(d["unit"] or d["pid"]); self.f_unit.set_sensitive(can)
         if not can: self.f_unit.set_active(False)
         self.meta.set_text(f"{d['source']}   {datetime.fromtimestamp(ts):%Y-%m-%d %H:%M:%S}\n"
                            f"{(d['message'] or '')[:500]}\n"
                            f"Unit: {d['unit'] or '-'}    PID: {d['pid'] or '-'}    Boot: {boot}")
-        self.log.get_buffer().set_text("Loading journal lines...")
         self.detail.set_visible(True)
-        self.sel = key = (fp, ts)
+        self.sel = (fp, ts); self.load_log()
+
+    def load_log(self):
+        """(Re)load the open event's journal lines for the selected time window."""
+        d, ts = self.cur[0], self.cur[1]
+        win = WINDOWS[self.f_win.get_selected()]
+        self.cur = (d, ts, None, win); self.copy_btn.set_sensitive(False)
+        self.log.get_buffer().set_text("Loading journal lines..."); self.log_info.set_text("")
+        self.sel = key = (self.sel[0], ts, win)
         def work():
-            lines, err = collector.context_lines(ts, b)
+            lines, err = collector.context_lines(ts, d["boot_id"], win)
             GLib.idle_add(self.show_log, key, lines, err)
         threading.Thread(target=work, daemon=True).start()
 
     def show_log(self, key, lines, err):
         if key != self.sel: return
-        self.cur = (self.cur[0], self.cur[1], lines); self.copy_btn.set_sensitive(True)
+        self.cur = (self.cur[0], self.cur[1], lines, self.cur[3]); self.copy_btn.set_sensitive(True)
         if err: self.log.get_buffer().set_text(err); self.log_info.set_text(""); return
         self.render_log()
 
@@ -304,6 +319,14 @@ class Window(Adw.ApplicationWindow):
         Gdk.Display.get_default().get_clipboard().set(event_markdown(*self.cur))
         btn.set_icon_name("object-select-symbolic")
         GLib.timeout_add(1500, lambda: btn.set_icon_name("edit-copy-symbolic") and False)
+
+    def copy_command(self, btn):
+        if not self.cur: return
+        d, ts, _, win = self.cur
+        Gdk.Display.get_default().get_clipboard().set(
+            collector.journalctl_command(ts, d["boot_id"], win, self.f_err.get_active()))
+        btn.set_icon_name("object-select-symbolic")
+        GLib.timeout_add(1500, lambda: btn.set_icon_name("utilities-terminal-symbolic") and False)
 
     @staticmethod
     def row_button(tip, cb):

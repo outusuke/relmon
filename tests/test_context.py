@@ -23,4 +23,17 @@ assert names(filter_lines(ls, unit="u.service", pid="7")) == ["b", "c", "EV"]
 c = collapse([L(6, "x"), L(6, "x"), L(6, "x"), L(6, "y"), L(3, "EV", hit=True), L(3, "EV", hit=True)])
 assert [(l.body, l.n) for l in c] == [("x", 3), ("y", 1), ("EV", 1), ("EV", 1)]
 assert display_line(c[0]).endswith("x  \u00d73") and "ERR" in display_line(L(3, "b")) and "event" in display_line(c[2])
+
+import shlex
+from datetime import datetime
+from collector import journalctl_command
+from core import event_markdown
+t0 = datetime(2026, 11, 11, 12, 0, 0).timestamp()
+p = shlex.split(journalctl_command(t0, "abc123", 120, True))
+assert p[p.index("--since") + 1] == "2026-11-11 11:58:00" and p[p.index("--until") + 1] == "2026-11-11 12:02:00"
+assert p[p.index("-b") + 1] == "abc123" and p[p.index("-p") + 1] == "4"
+q = shlex.split(journalctl_command(t0)); assert "-b" not in q and "-p" not in q and q[0] == "journalctl"
+d = dict(category="oom", source="kernel", message="m", unit=None, pid=None, boot_id=None, boot_start=None, kernel=None)
+assert "\u00b1120 s" in event_markdown(d, t0, [L(6, "a"), L(3, "EV", hit=True)], 120)
+assert "\u00b130 s" in event_markdown(d, t0, [L(6, "a")])
 print("context ok")
