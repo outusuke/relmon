@@ -57,4 +57,7 @@ assert display_line(M("a\n\nb\n   \nc")).split("\n")[1:] == [" " * 13 + "b", " "
 rows = display_line(M("\n\n".join(f"r{i}" for i in range(7)))).split("\n")
 assert len(rows) == 7 and rows[-1] == " " * 13 + "\u2026 1 more line"           # blanks don't count towards the fold
 assert display_line(M("")).strip() == "+0ms"                                      # an empty message still shows its line
+from collector import one_line
+assert one_line("a\n  b\x1b[2m c\n") == "a b c" and one_line(None) == ""
+assert one_line("x" * 300) == "x" * 200 + "\u2026" and one_line("x" * 200) == "x" * 200
 print("context ok")

@@ -138,6 +138,12 @@ def collapse(lines):
     return out
 
 
+def one_line(text, limit=200):
+    """Message for a list row: colour codes gone, whitespace collapsed, cut at limit, so all rows get the same height."""
+    t = " ".join(ANSI_RE.sub("", text or "").split())
+    return t if len(t) <= limit else t[:limit] + "\u2026"
+
+
 def display_line(l):
     """One log line as shown in the UI: severity word (not just colour), time from the event, message.
     Continuation lines (stack traces) are indented under the message; long ones are folded or cut."""

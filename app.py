@@ -98,7 +98,7 @@ class Window(Adw.ApplicationWindow):
         self.detail.append(top)
         self.detail.append(fbar)
         self.detail.append(Gtk.ScrolledWindow(child=self.log, vexpand=True, min_content_height=160))
-        paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, resize_end_child=True,
+        self.paned = paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, resize_end_child=True,
                           shrink_end_child=False, start_child=Gtk.ScrolledWindow(child=self.stack),
                           end_child=self.detail)
         self.search = Gtk.SearchEntry(placeholder_text="Filter by source or message", margin_start=12, margin_end=12,
@@ -215,7 +215,7 @@ class Window(Adw.ApplicationWindow):
         rows, more = list_events(self.db, self.cat, t0, self.text, self.limit)
         while (c := self.list.get_first_child()): self.list.remove(c)
         for ts, cat, src, msg, count, fp in rows:
-            row = Adw.ActionRow(title=GLib.markup_escape_text(src or "?"), subtitle=GLib.markup_escape_text((msg or "")[:200]),
+            row = Adw.ActionRow(title=GLib.markup_escape_text(src or "?"), subtitle=GLib.markup_escape_text(collector.one_line(msg)),
                                 subtitle_lines=2, activatable=True)
             row.connect("activated", lambda _, f=fp, t=ts: self.show_detail(f, t))
             row.add_suffix(Gtk.Label(label=f"{datetime.fromtimestamp(ts):%b %d %H:%M}" + (f"  ×{count}" if count > 1 else ""),
@@ -245,8 +245,14 @@ class Window(Adw.ApplicationWindow):
         self.meta.set_text(f"{d['source']}   {datetime.fromtimestamp(ts):%Y-%m-%d %H:%M:%S}\n"
                            f"{(d['message'] or '')[:500]}\n"
                            f"Unit: {d['unit'] or '-'}    PID: {d['pid'] or '-'}    Boot: {boot}")
+        if not self.detail.get_visible(): GLib.idle_add(self.split_half)
         self.detail.set_visible(True)
         self.sel = (fp, ts); self.load_log()
+
+    def split_half(self):
+        """When the details open, give the event list half the height (it was squeezed to a couple of rows)."""
+        if self.paned.get_height() > 0: self.paned.set_position(self.paned.get_height() // 2)
+        return False
 
     def load_log(self):
         """(Re)load the open event's journal lines for the selected time window."""
@@ -367,7 +373,7 @@ class Window(Adw.ApplicationWindow):
         while (c := self.list.get_first_child()): self.list.remove(c)
         rows = muted_rows(self.db)
         for fp, src, msg, _ in rows:
-            row = Adw.ActionRow(title=GLib.markup_escape_text(src or "?"), subtitle=GLib.markup_escape_text(msg or ""),
+            row = Adw.ActionRow(title=GLib.markup_escape_text(src or "?"), subtitle=GLib.markup_escape_text(collector.one_line(msg)),
                                 subtitle_lines=2)
             row.add_suffix(self.row_button("Unmute", lambda _, f=fp: (unmute(self.db, f), self.reload())))
             self.list.append(row)
