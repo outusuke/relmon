@@ -18,8 +18,17 @@ ls = [L(6, "a"), L(3, "b", unit="u.service"), L(6, "c", pid="7"), L(4, "d"), L(3
 names = lambda x: [l.body for l in x]
 assert names(filter_lines(ls)) == ["a", "b", "c", "d", "EV", "e"]
 assert names(filter_lines(ls, errors_only=True)) == ["b", "d", "EV"]
-assert names(filter_lines(ls, unit="u.service")) == ["b", "EV"] and names(filter_lines(ls, pid="7")) == ["c", "EV"]
-assert names(filter_lines(ls, unit="u.service", pid="7")) == ["b", "c", "EV"]
+assert names(filter_lines(ls, terms={"u"})) == ["b", "EV"] and names(filter_lines(ls, pid="7")) == ["c", "EV"]   # unit "u.service"
+assert names(filter_lines(ls, terms={"u"}, pid="7")) == ["b", "c", "EV"]
+from collector import related_terms
+d = dict(unit="init.scope", pid="1", source="systemd", message="Failed to start zswap-cli.service - Command-line tool.")
+assert related_terms(d) == ({"zswap-cli"}, None)          # systemd/PID 1 would match every line
+assert related_terms(dict(unit="session-2.scope", pid="4242", source="firefox", message="crashed")) == ({"session-2", "firefox"}, "4242")
+assert related_terms(dict(unit=None, pid=None, source="kernel", message="Out of memory: Killed process 5 (x)")) == (set(), None)
+zs = [L(6, "zswap-cli[890]: set", pid="890"), L(6, "systemd[1]: Started x.service", pid="1"),
+      L(6, "audit[1]: unit=zswap-cli res=failed", pid="1"), L(3, "EV", hit=True)]
+assert names(filter_lines(zs, terms={"zswap-cli"})) == ["zswap-cli[890]: set", "audit[1]: unit=zswap-cli res=failed", "EV"]
+assert "-12ms" in display_line(LogLine(6, "t", False, -0.012, None, None, "m", 1)) and "+2.5s" in display_line(LogLine(6, "t", False, 2.5, None, None, "m", 1))
 c = collapse([L(6, "x"), L(6, "x"), L(6, "x"), L(6, "y"), L(3, "EV", hit=True), L(3, "EV", hit=True)])
 assert [(l.body, l.n) for l in c] == [("x", 3), ("y", 1), ("EV", 1), ("EV", 1)]
 assert display_line(c[0]).endswith("x  \u00d73") and "ERR" in display_line(L(3, "b")) and "event" in display_line(c[2])

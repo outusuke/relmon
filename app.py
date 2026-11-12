@@ -82,7 +82,7 @@ class Window(Adw.ApplicationWindow):
         self.detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, visible=False)
         fbar = Gtk.Box(spacing=6, margin_start=12, margin_end=12, margin_top=4, margin_bottom=4)
         self.f_err = Gtk.ToggleButton(label="Warnings and errors", tooltip_text="Hide info and debug lines")
-        self.f_unit = Gtk.ToggleButton(label="Same unit / PID", tooltip_text="Only lines from the event's unit or process")
+        self.f_unit = Gtk.ToggleButton(label="Related lines", tooltip_text="Only lines that mention the event's service or process")
         self.f_wrap = Gtk.ToggleButton(label="Wrap lines")
         self.log_info = Gtk.Label(css_classes=["dim-label"], hexpand=True, xalign=1)
         self.f_win = named(Gtk.DropDown(model=Gtk.StringList.new(["±10 s", "±30 s", "±2 min"]), selected=1,
@@ -240,7 +240,7 @@ class Window(Adw.ApplicationWindow):
         if not d: return
         boot = boot_label(d)
         self.cur = (d, ts, None); self.copy_btn.set_sensitive(False)
-        can = bool(d["unit"] or d["pid"]); self.f_unit.set_sensitive(can)
+        can = any(collector.related_terms(d)); self.f_unit.set_sensitive(can)
         if not can: self.f_unit.set_active(False)
         self.meta.set_text(f"{d['source']}   {datetime.fromtimestamp(ts):%Y-%m-%d %H:%M:%S}\n"
                            f"{(d['message'] or '')[:500]}\n"
@@ -271,7 +271,8 @@ class Window(Adw.ApplicationWindow):
         if not self.cur or self.cur[2] is None: return
         d, lines = self.cur[0], self.cur[2]
         same = self.f_unit.get_active()
-        kept = collector.filter_lines(lines, self.f_err.get_active(), d["unit"] if same else None, d["pid"] if same else None)
+        terms, pid = collector.related_terms(d) if same else ((), None)
+        kept = collector.filter_lines(lines, self.f_err.get_active(), terms, pid)
         self.log_info.set_text(f"{len(kept)} of {len(lines)} lines")
         self.log.set_wrap_mode(Gtk.WrapMode.WORD_CHAR if self.f_wrap.get_active() else Gtk.WrapMode.NONE)
         buf = self.log.get_buffer(); buf.set_text(""); mark = None

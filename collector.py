@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Reads journal errors + coredumps into SQLite. Run: python collector.py [--follow]"""
-import fcntl, hashlib, json, os, platform, shlex, subprocess, sys, time
+import fcntl, hashlib, json, os, platform, re, shlex, subprocess, sys, time
 from collections import namedtuple
 from datetime import datetime
 from core import report, connect, fingerprint, prune, retention_cutoff, new_alerts, classify, parse_failed, DB_PATH
@@ -23,6 +23,9 @@ def _journal(args):
     return r.stdout if r.returncode == 0 else None
 
 
+GENERIC_UNITS = {"init.scope", "system.slice", "user.slice", "-.slice"}   # name nothing in particular
+GENERIC_SOURCES = {"systemd", "kernel", "audit", "unknown", "?"}           # every line of these would match
+UNIT_RE = re.compile(r"[\w@:\\.-]+?\.(?:service|socket|timer|mount|automount|path|swap|target|device)\b")
 STAMP_W = 13   # width of "HH:MM:SS.mmm " at the start of a display line
 LogLine = namedtuple("LogLine", "prio text hit rel unit pid body n")   # rel = seconds from the event, n = repeat count
 
@@ -94,15 +97,28 @@ def context_lines(ts, boot=None, window=30):
     return lines or None, (None if lines else "No journal lines in this window (the journal may have rotated).")
 
 
-def filter_lines(lines, errors_only=False, unit=None, pid=None):
+def related_terms(d):
+    """What ties journal lines to an event dict: (name stems, pid). Units named in the message count too
+    ("Failed to start foo.service" -> "foo"). PID 1 (systemd) and generic sources are ignored: they match everything."""
+    names = set()
+    for u in [d.get("unit")] + UNIT_RE.findall(d.get("message") or ""):
+        if u and u not in GENERIC_UNITS:
+            names.add(u.rsplit(".", 1)[0] if "." in u else u)
+    if d.get("source") not in GENERIC_SOURCES:
+        names.add(d["source"])
+    pid = d.get("pid")
+    return {n for n in names if n and len(n) >= 3}, (pid if pid not in (None, "0", "1") else None)
+
+
+def filter_lines(lines, errors_only=False, terms=(), pid=None):
     """Lines for the log view. The event line is always kept; errors_only keeps warnings and worse;
-    unit/pid keep only lines from that unit or process."""
+    terms/pid (see related_terms) keep only lines that mention one of the names or come from that pid."""
     out = []
     for l in lines:
         if not l.hit:
             if errors_only and l.prio > 4:
                 continue
-            if (unit or pid) and not ((unit and l.unit == unit) or (pid and l.pid == str(pid))):
+            if (terms or pid) and not ((pid and l.pid == str(pid)) or any(t in l.body or t in (l.unit or "") for t in terms)):
                 continue
         out.append(l)
     return out
@@ -123,7 +139,7 @@ def collapse(lines):
 def display_line(l):
     """One log line as shown in the UI: severity word (not just colour), time from the event, message."""
     tag = "ERR " if l.prio <= 3 else "WARN" if l.prio == 4 else "    "
-    rel = "event" if l.hit else f"{l.rel:+.1f}s"
+    rel = "event" if l.hit else f"{l.rel * 1000:+.0f}ms" if abs(l.rel) < 1 else f"{l.rel:+.1f}s"
     return f"{tag} {rel:>7} {l.body}" + (f"  \u00d7{l.n}" if l.n > 1 else "")
 
 
