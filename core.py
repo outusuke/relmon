@@ -44,6 +44,10 @@ CATEGORY_CAP = {"error": 2.0, "service": 4.0, "kernel": 4.0}
 REPEAT_CAP = 2.0   # n repeats from one source count 1+log10(n) times, at most this many
 SCORE_K = 6.0      # softness of the curve: bigger = more forgiving
 RETENTION_DAYS = 90   # older events/boots are pruned
+# An event that showed up on at least USUAL_MIN of the previous USUAL_DAYS days is "usual" for the machine:
+# it no longer lowers the score and is listed separately instead. These categories never count as usual.
+USUAL_DAYS, USUAL_MIN = 7, 3
+NEVER_USUAL = frozenset({"panic", "unclean", "disk"})
 
 
 def connect(path=DB_PATH):
@@ -136,8 +140,8 @@ def muted_rows(db):
 
 
 def score_inputs(db):
-    """(events, boots) for daily_scores(), with muted fingerprints excluded."""
-    rows = db.execute(f"SELECT ts,category,source FROM events WHERE {NOT_MUTED}").fetchall()
+    """(events, boots) for daily_scores(), with muted fingerprints excluded. Events are (ts, category, source, fingerprint)."""
+    rows = db.execute(f"SELECT ts,category,source,fingerprint FROM events WHERE {NOT_MUTED}").fetchall()
     return rows, db.execute("SELECT first_ts, last_ts FROM boots").fetchall()
 
 
@@ -374,12 +378,24 @@ def score_tooltip(d, s):
     return f"{d:%a %b} {d.day}: " + ("machine was off" if s is None else f"score {s:.1f}/10")
 
 
+def _usual_keys(day_keys, d):
+    """Keys that count as usual on day d: seen on >= USUAL_MIN of the USUAL_DAYS days before d.
+    day_keys: {date: {(category, key)}}. Today's own events are not part of the history they are judged against."""
+    seen = {}
+    for i in range(1, USUAL_DAYS + 1):
+        for ck in day_keys.get(d - timedelta(days=i), ()):
+            seen[ck] = seen.get(ck, 0) + 1
+    return {ck: n for ck, n in seen.items() if n >= USUAL_MIN and ck[0] not in NEVER_USUAL}
+
+
 def daily_scores(events, boots=None, today=None):
-    """events: iterable of (ts, category, source). Returns {date: score 1..10}.
+    """events: iterable of (ts, category, source) or (ts, category, source, fingerprint). Returns {date: score 1..10}.
+    Each day is judged against the machine's own recent history: an event (fingerprint, else source) that appeared on
+    USUAL_MIN or more of the previous USUAL_DAYS days is usual and costs nothing (see NEVER_USUAL for exceptions).
     boots: optional [(first_ts, last_ts)]; days with no boot and no events become None (gap).
     Other days without events count as 10."""
     today = today or date.today()
-    per = {}  # (day, source, category) -> number of events
+    evs = []   # (day, category, source, key)
     first = today
     active = None
     if boots:
@@ -389,11 +405,22 @@ def daily_scores(events, boots=None, today=None):
             first = min(first, d)
             while d <= e:
                 active.add(d); d += timedelta(days=1)
-    for ts, cat, src in events:
+    for ts, cat, src, *fp in events:
         d = datetime.fromtimestamp(ts).date()
         first = min(first, d)
         if active is not None:
             active.add(d)
+        evs.append((d, cat, src, fp[0] if fp and fp[0] else f"{src}|{cat}"))
+    day_keys = {}
+    for d, cat, _, key in evs:
+        day_keys.setdefault(d, set()).add((cat, key))
+    usual = {}   # day -> usual keys, computed once per day that has events
+    per = {}  # (day, source, category) -> number of events that still count
+    for d, cat, src, key in evs:
+        if d not in usual:
+            usual[d] = _usual_keys(day_keys, d)
+        if (cat, key) in usual[d]:
+            continue
         per[(d, src, cat)] = per.get((d, src, cat), 0) + 1
     by_cat = {}  # (day, category) -> summed penalty, capped below
     for (d, _, cat), n in per.items():
@@ -407,6 +434,30 @@ def daily_scores(events, boots=None, today=None):
         out[d] = None if gap else round(1 + 9 * math.exp(-totals.get(d, 0) / SCORE_K), 1)
         d += timedelta(days=1)
     return out
+
+
+def usual_events(db, today=None):
+    """The events the score currently treats as usual (seen on >= USUAL_MIN of the last USUAL_DAYS days before today,
+    and not in NEVER_USUAL): [dict(category, source, message, days, count, last, fingerprint)], most frequent first.
+    days = how many of those days it appeared on. Muted events are excluded (they are hidden anyway)."""
+    today = today or date.today()
+    t0 = datetime.combine(today - timedelta(days=USUAL_DAYS), datetime.min.time()).timestamp()
+    t1 = datetime.combine(today, datetime.min.time()).timestamp()
+    rows = db.execute(f"SELECT ts,category,source,message,fingerprint FROM events WHERE ts>=? AND ts<? AND {NOT_MUTED}",
+                      (t0, t1)).fetchall()
+    day_keys, info = {}, {}
+    for ts, cat, src, msg, fp in rows:
+        d = datetime.fromtimestamp(ts).date()
+        ck = (cat, fp)
+        day_keys.setdefault(d, set()).add(ck)
+        i = info.setdefault(ck, dict(category=cat, source=src, message=msg, count=0, last=ts, fingerprint=fp))
+        i["count"] += 1
+        if ts >= i["last"]:
+            i["last"], i["message"] = ts, msg
+    out = []
+    for ck, n in _usual_keys(day_keys, today).items():
+        out.append(dict(info[ck], days=n))
+    return sorted(out, key=lambda u: (-u["days"], -u["count"], u["source"] or ""))
 
 
 def report(db, days=7, today=None, md=False):
@@ -440,6 +491,11 @@ def report(db, days=7, today=None, md=False):
     out.append(h("Top problems"))
     out += [(f"- x{n} **{s}** ({c}): `{one(m).replace(chr(96), chr(39))}`" if md else f"  x{n:<4} {s} [{c}] {one(m)}")
             for c, s, m, n in top] or ["  none"]
+    usual = usual_events(db, today)
+    if usual:
+        out.append(h("Usual problems (seen on most recent days, not scored)"))
+        out += [(f"- {u['days']}/{USUAL_DAYS} days **{u['source']}** ({u['category']}): `{one(u['message']).replace(chr(96), chr(39))}`" if md
+                 else f"  {u['days']}/{USUAL_DAYS}d  {u['source']} [{u['category']}] {one(u['message'])}") for u in usual[:10]]
     if kern:
         out.append(h("Kernels (average daily score)"))
         out += [(f"- {k['kernel']}: {k['avg']:.1f}/10 over {k['days']} day(s)" if md else f"  {k['kernel']:<28} {k['avg']:.1f}/10  {k['days']}d")

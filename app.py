@@ -10,7 +10,7 @@ from datetime import date, datetime
 from gi.repository import Adw, Gtk, GLib, Gdk, PangoCairo
 from core import (connect, daily_scores, score_inputs, mute, unmute, muted_rows, event_detail, event_markdown,
                   boot_label, bar_index, label_step, day_label, score_tooltip, kernel_report, kernel_boots, list_events, PAGE, app_trends, trend_line,
-                  score_rgb, step_index, chart_summary, category_counts, chart_header)
+                  score_rgb, step_index, chart_summary, category_counts, chart_header, usual_events, USUAL_DAYS)
 
 # sidebar sections: event filters, read-only insights, and the mute list
 GROUPS = {"all": "Events", "apps": "Insights", "muted": "Manage"}
@@ -20,7 +20,7 @@ WINDOWS = (10, 30, 120)   # seconds of journal either side of an event; index = 
 CATS = [("all", "All events"), ("panic", "Panics"), ("crash", "App crashes"),
         ("oom", "Out of memory"), ("disk", "Disk / filesystem"),
         ("gpu", "GPU"), ("thermal", "Thermal"), ("kernel", "Other kernel / hardware"), ("service", "Service failures"), ("unclean", "Unclean shutdowns"),
-        ("change", "Changes"), ("error", "Other errors"), ("apps", "App trends"), ("kernels", "Kernels"),
+        ("change", "Changes"), ("error", "Other errors"), ("apps", "App trends"), ("usual", "Usual problems"), ("kernels", "Kernels"),
         ("muted", "Muted")]
 
 
@@ -246,11 +246,12 @@ class Window(Adw.ApplicationWindow):
 
     def fill(self):
         if not hasattr(self, "scores"): return self.reload()
-        self.search.set_sensitive(self.cat not in ("muted", "kernels", "apps"))
+        self.search.set_sensitive(self.cat not in ("muted", "kernels", "apps", "usual"))
         self.update_chrome()
         if self.cat == "muted": return self.fill_muted()
         if self.cat == "kernels": return self.fill_kernels()
         if self.cat == "apps": return self.fill_apps()
+        if self.cat == "usual": return self.fill_usual()
         t0 = datetime.combine(self.day, datetime.min.time()).timestamp() if self.day else None
         rows, more = list_events(self.db, self.cat, t0, self.text, self.limit)
         while (c := self.list.get_first_child()): self.list.remove(c)
@@ -301,6 +302,7 @@ class Window(Adw.ApplicationWindow):
         counts = category_counts(self.db, t0)
         for key, lab in self.badges.items():
             n = len(muted_rows(self.db)) if key == "muted" else sum(counts.values()) if key == "all" \
+                else len(usual_events(self.db)) if key == "usual" \
                 else counts.get(key, 0) if key not in ("apps", "kernels") else 0
             lab.set_text(str(n) if n else "")
         self.banner.set_title(f"Showing {self.day:%A, %b} {self.day.day} only" if self.day else "")
@@ -424,6 +426,25 @@ class Window(Adw.ApplicationWindow):
             self.list.append(row)
         self.empty.set_icon_name("emblem-ok-symbolic"); self.empty.set_child(None)
         self.empty.set_title("No app crashes"); self.empty.set_description("Nothing crashed in the last 30 days.")
+        self.stack.set_visible_child_name("list" if rows else "empty")
+
+    def fill_usual(self):
+        """Events that happen on most days: they no longer lower the daily score, but stay visible here."""
+        while (c := self.list.get_first_child()): self.list.remove(c)
+        rows = usual_events(self.db)
+        for u in rows:
+            row = Adw.ActionRow(title=GLib.markup_escape_text(u["source"] or "?"),
+                                subtitle=GLib.markup_escape_text(collector.one_line(u["message"])), subtitle_lines=2,
+                                activatable=True, tooltip_text="Click to see the journal around the latest occurrence")
+            row.connect("activated", lambda _, f=u["fingerprint"], t=u["last"]: self.show_detail(f, t))
+            row.add_prefix(Gtk.Label(label=dict(CATS).get(u["category"], u["category"]), css_classes=["caption", "dim-label"],
+                                     width_chars=12, xalign=0, wrap=True))
+            row.add_suffix(Gtk.Label(label=f"{u['days']} of last {USUAL_DAYS} days", css_classes=["dim-label"]))
+            row.add_suffix(self.row_button("Hide this kind of event", lambda _, f=u["fingerprint"], s=u["source"], m=u["message"]: self.hide(f, s, m)))
+            self.list.append(row)
+        self.empty.set_icon_name("emblem-ok-symbolic"); self.empty.set_child(None)
+        self.empty.set_title("Nothing usual yet")
+        self.empty.set_description("Events that show up on 3 or more of the last 7 days are listed here and stop lowering the score.")
         self.stack.set_visible_child_name("list" if rows else "empty")
 
     def fill_kernels(self):
