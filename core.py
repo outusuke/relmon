@@ -38,6 +38,9 @@ PATTERNS = [
                 r"thermal throttl|thermal.*(critical|trip)|cpu clock throttled|overheat"),
 ]
 _PATTERNS = [(k, re.compile(p)) for k, p in PATTERNS]
+# Most one category can take off a single day. Open-ended categories (every new source or unit adds its own
+# penalty) would otherwise drive a day to the floor on their own. Panics, crashes and unclean shutdowns stay uncapped.
+CATEGORY_CAP = {"error": 2.0, "service": 4.0, "kernel": 4.0}
 REPEAT_CAP = 2.0   # n repeats from one source count 1+log10(n) times, at most this many
 SCORE_K = 6.0      # softness of the curve: bigger = more forgiving
 RETENTION_DAYS = 90   # older events/boots are pruned
@@ -392,9 +395,12 @@ def daily_scores(events, boots=None, today=None):
         if active is not None:
             active.add(d)
         per[(d, src, cat)] = per.get((d, src, cat), 0) + 1
-    totals = {}
+    by_cat = {}  # (day, category) -> summed penalty, capped below
     for (d, _, cat), n in per.items():
-        totals[d] = totals.get(d, 0) + WEIGHTS.get(cat, 0.3) * min(REPEAT_CAP, 1 + math.log10(n))
+        by_cat[(d, cat)] = by_cat.get((d, cat), 0) + WEIGHTS.get(cat, 0.3) * min(REPEAT_CAP, 1 + math.log10(n))
+    totals = {}
+    for (d, cat), v in by_cat.items():
+        totals[d] = totals.get(d, 0) + min(v, CATEGORY_CAP.get(cat, v))
     out, d = {}, first
     while d <= today:
         gap = active is not None and d not in active

@@ -160,6 +160,13 @@ def display_line(l):
     return head + ("\n" + " " * len(head)).join(rows) + (f"  \u00d7{l.n}" if l.n > 1 else "")
 
 
+def from_container(e):
+    """True for a journal entry written by a container's log driver (Docker/Podman set CONTAINER_NAME / CONTAINER_ID).
+    What runs inside a container says nothing about the reliability of this machine, and every container name
+    would otherwise show up as a separate source."""
+    return bool(e.get("CONTAINER_NAME") or e.get("CONTAINER_ID"))
+
+
 def collect_journal(db):
     cur = db.execute("SELECT v FROM meta WHERE k='cursor'").fetchone()
     out = _journal(["--after-cursor", cur[0]]) if cur else None
@@ -172,6 +179,9 @@ def collect_journal(db):
         try:
             e = json.loads(line)
         except ValueError:
+            continue
+        if from_container(e):
+            last = e.get("__CURSOR", last)   # still move the cursor past it
             continue
         msg = e.get("MESSAGE")
         msg = msg if isinstance(msg, str) else str(msg)
