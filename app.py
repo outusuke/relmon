@@ -10,8 +10,10 @@ from datetime import date, datetime
 from gi.repository import Adw, Gtk, GLib, Gdk, PangoCairo
 from core import (connect, daily_scores, score_inputs, mute, unmute, muted_rows, event_detail, event_markdown,
                   boot_label, bar_index, label_step, day_label, score_tooltip, kernel_report, kernel_boots, list_events, PAGE, app_trends, trend_line,
-                  score_rgb, step_index, chart_summary)
+                  score_rgb, step_index, chart_summary, category_counts, chart_header)
 
+# sidebar sections: event filters, read-only insights, and the mute list
+GROUPS = {"all": "Events", "apps": "Insights", "muted": "Manage"}
 LABEL_H = 16   # px reserved under the bars for day labels
 WINDOWS = (10, 30, 120)   # seconds of journal either side of an event; index = log window dropdown
 
@@ -35,14 +37,35 @@ class Window(Adw.ApplicationWindow):
         self.limit, self.text = PAGE, ""
         # sidebar
         side = Gtk.ListBox(css_classes=["navigation-sidebar"])
+        self.badges = {}   # category key -> count label
         for key, label in CATS:
             r = Gtk.ListBoxRow(); r.key = key
-            r.set_child(Gtk.Label(label=label, xalign=0, margin_top=10, margin_bottom=10, margin_start=8))
+            line = Gtk.Box(spacing=8, margin_top=10, margin_bottom=10, margin_start=8, margin_end=8)
+            line.append(Gtk.Label(label=label, xalign=0, hexpand=True))
+            self.badges[key] = Gtk.Label(css_classes=["dim-label", "numeric"])
+            line.append(self.badges[key]); r.set_child(line)
             side.append(r)
+        def section(row, before):   # a small heading above the first row of each group
+            if row.key in GROUPS:
+                row.set_header(Gtk.Label(label=GROUPS[row.key], xalign=0, css_classes=["caption-heading", "dim-label"],
+                                         margin_start=12, margin_top=10 if before else 2, margin_bottom=2))
+            else:
+                row.set_header(None)
+        side.set_header_func(section)
         side.connect("row-selected", lambda _, r: r and self.set_cat(r.key))
         side_page = Adw.NavigationPage(title="Categories", child=Adw.ToolbarView(content=side))
         side_page.get_child().add_top_bar(Adw.HeaderBar())
         # content: score chart + event list
+        self.chart_title = Gtk.Label(xalign=0, css_classes=["heading"], margin_start=12, margin_end=12, margin_top=10)
+        self.chart_sub = Gtk.Label(xalign=0, wrap=True, css_classes=["dim-label", "caption"], margin_start=12, margin_end=12)
+        legend = Gtk.Label(xalign=0, use_markup=True, css_classes=["caption"], margin_start=12, margin_end=12,
+                           label="Bar height = score (taller is healthier).  "
+                                 "<span foreground='#26a269'>■</span> Good (7+)  "
+                                 "<span foreground='#c77800'>■</span> Fair (4–7)  "
+                                 "<span foreground='#c01c28'>■</span> Poor (under 4)  "
+                                 "<span foreground='#888888'>▁</span> Machine off")
+        self.banner = Adw.Banner(button_label="Show all days")
+        self.banner.connect("button-clicked", lambda _: self.day and self.toggle_day(self.day))
         self.chart = Gtk.DrawingArea(content_height=120 + LABEL_H, margin_start=12, margin_end=12, margin_top=8,
                                      has_tooltip=True, focusable=True)
         self.kb = None   # keyboard-focused bar
@@ -101,13 +124,24 @@ class Window(Adw.ApplicationWindow):
         self.paned = paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, vexpand=True, resize_end_child=True,
                           shrink_end_child=False, start_child=Gtk.ScrolledWindow(child=self.stack),
                           end_child=self.detail)
-        self.search = Gtk.SearchEntry(placeholder_text="Filter by source or message", margin_start=12, margin_end=12,
+        self.search = Gtk.SearchEntry(placeholder_text="Filter by source or message (Ctrl+F)", margin_start=12, margin_end=12,
                                       margin_top=8)
         self.search.connect("search-changed", self.on_search)
-        box.append(self.chart); box.append(self.search); box.append(paned)
-        refresh = named(Gtk.Button(icon_name="view-refresh-symbolic"), "Refresh"); refresh.connect("clicked", lambda _: self.refresh())
-        bar = Adw.HeaderBar(); bar.pack_end(self.setup_menu()); bar.pack_end(refresh)
-        view = Adw.ToolbarView(content=box); view.add_top_bar(bar)
+        box.append(self.chart_title); box.append(self.chart_sub); box.append(self.chart); box.append(legend)
+        box.append(self.banner); box.append(self.search); box.append(paned)
+        self.refresh_btn = named(Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Refresh (F5)"), "Refresh")
+        self.refresh_btn.connect("clicked", lambda _: self.refresh())
+        bar = Adw.HeaderBar(); bar.pack_end(self.setup_menu()); bar.pack_end(self.refresh_btn)
+        self.toasts = Adw.ToastOverlay(child=box)
+        view = Adw.ToolbarView(content=self.toasts); view.add_top_bar(bar)
+        # shortcuts: Ctrl+F jumps to the filter box, F5 / Ctrl+R refreshes
+        sc = Gtk.ShortcutController(scope=Gtk.ShortcutScope.GLOBAL)
+        sc.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string("<Control>f"),
+                                     action=Gtk.CallbackAction.new(lambda *_: self.search.grab_focus() or True)))
+        for acc in ("F5", "<Control>r"):
+            sc.add_shortcut(Gtk.Shortcut(trigger=Gtk.ShortcutTrigger.parse_string(acc),
+                                         action=Gtk.CallbackAction.new(lambda *_: self.refresh() or True)))
+        self.add_controller(sc)
         split = Adw.NavigationSplitView(sidebar=side_page, content=Adw.NavigationPage(title="Timeline", child=view))
         self.set_content(split)
         side.select_row(side.get_row_at_index(0))
@@ -121,6 +155,8 @@ class Window(Adw.ApplicationWindow):
 
     def refresh(self):
         """Run the collector in the background, then redraw."""
+        if not self.refresh_btn.get_sensitive(): return   # already running
+        self.refresh_btn.set_sensitive(False); self.refresh_btn.set_tooltip_text("Reading the journal...")
         def work():
             d = connect(); collector.run_once(d); d.close()
             GLib.idle_add(self.reload)
@@ -142,6 +178,9 @@ class Window(Adw.ApplicationWindow):
         self.days = sorted(self.scores)[-30:]
         self.kb = None if self.kb is None or self.kb >= len(self.days) else self.kb
         named(self.chart, chart_summary(self.days, self.scores))
+        title, sub = chart_header(self.days, self.scores)
+        self.chart_title.set_text(title); self.chart_sub.set_text(sub)
+        self.refresh_btn.set_sensitive(True); self.refresh_btn.set_tooltip_text("Refresh (F5)")
         self.chart.queue_draw(); self.fill()
 
     def draw(self, area, cr, w, h):
@@ -208,6 +247,7 @@ class Window(Adw.ApplicationWindow):
     def fill(self):
         if not hasattr(self, "scores"): return self.reload()
         self.search.set_sensitive(self.cat not in ("muted", "kernels", "apps"))
+        self.update_chrome()
         if self.cat == "muted": return self.fill_muted()
         if self.cat == "kernels": return self.fill_kernels()
         if self.cat == "apps": return self.fill_apps()
@@ -216,24 +256,55 @@ class Window(Adw.ApplicationWindow):
         while (c := self.list.get_first_child()): self.list.remove(c)
         for ts, cat, src, msg, count, fp in rows:
             row = Adw.ActionRow(title=GLib.markup_escape_text(src or "?"), subtitle=GLib.markup_escape_text(collector.one_line(msg)),
-                                subtitle_lines=2, activatable=True)
+                                subtitle_lines=2, activatable=True, tooltip_text="Click to see the journal around this event")
             row.connect("activated", lambda _, f=fp, t=ts: self.show_detail(f, t))
+            if self.cat == "all":   # the category is implied in every other view
+                row.add_prefix(Gtk.Label(label=dict(CATS).get(cat, cat), css_classes=["caption", "dim-label"],
+                                         width_chars=12, xalign=0, wrap=True))
             row.add_suffix(Gtk.Label(label=f"{datetime.fromtimestamp(ts):%b %d %H:%M}" + (f"  ×{count}" if count > 1 else ""),
                                      css_classes=["dim-label"]))
-            row.add_suffix(self.row_button("Hide this", lambda _, f=fp, s=src, m=msg: (mute(self.db, f, s, m), self.reload())))
+            row.add_suffix(self.row_button("Hide this kind of event", lambda _, f=fp, s=src, m=msg: self.hide(f, s, m)))
             self.list.append(row)
         if more:
             b = Gtk.Button(label=f"Show more ({len(rows)} shown)", css_classes=["flat"])
             b.connect("clicked", lambda _: self.more())
             self.list.append(b)
-        if self.day or self.cat != "all" or self.text:
-            self.empty.set_title("No matching events")
-            self.empty.set_description(dict(CATS)[self.cat] + (f" on {self.day:%b %d}" if self.day else "")
-                                       + (f' matching "{self.text}"' if self.text else "")
-                                       + (". Click the selected day again to clear the day filter." if self.day else "."))
+        filtered = bool(self.day or self.cat != "all" or self.text)
+        if filtered:
+            scope = dict(CATS)[self.cat].lower() if self.cat != "all" else "events"
+            self.empty.set_icon_name("system-search-symbolic"); self.empty.set_title(f"No {scope} found")
+            self.empty.set_description("Nothing matches" + (f" on {self.day:%b} {self.day.day}" if self.day else "")
+                                       + (f' for "{self.text}"' if self.text else "")
+                                       + ("." if self.text else ". That is good news if you were looking for problems."))
+            if not self.empty.get_child():
+                b = Gtk.Button(label="Clear day and search", halign=Gtk.Align.CENTER, css_classes=["pill"])
+                b.connect("clicked", lambda _: self.clear_filters()); self.empty.set_child(b)
         else:
+            self.empty.set_icon_name("emblem-ok-symbolic"); self.empty.set_child(None)
             self.empty.set_title("All healthy"); self.empty.set_description("No events recorded.")
         self.stack.set_visible_child_name("list" if rows else "empty")
+
+    def hide(self, fp, src, msg):
+        """Mute an event kind, and offer Undo because the button is easy to hit by accident."""
+        mute(self.db, fp, src, msg); self.reload()
+        t = Adw.Toast(title=f"Hidden: {src or '?'}", button_label="Undo", timeout=6)
+        t.connect("button-clicked", lambda _: (unmute(self.db, fp), self.reload()))
+        self.toasts.add_toast(t)
+
+    def clear_filters(self):
+        self.day, self.text, self.limit = None, "", PAGE
+        self.search.set_text(""); self.chart.queue_draw(); self.fill()
+
+    def update_chrome(self):
+        """Sidebar counts for the selected day, and the banner that says a day filter is active."""
+        t0 = datetime.combine(self.day, datetime.min.time()).timestamp() if self.day else None
+        counts = category_counts(self.db, t0)
+        for key, lab in self.badges.items():
+            n = len(muted_rows(self.db)) if key == "muted" else sum(counts.values()) if key == "all" \
+                else counts.get(key, 0) if key not in ("apps", "kernels") else 0
+            lab.set_text(str(n) if n else "")
+        self.banner.set_title(f"Showing {self.day:%A, %b} {self.day.day} only" if self.day else "")
+        self.banner.set_revealed(bool(self.day))
 
     def show_detail(self, fp, ts):
         d = event_detail(self.db, fp, ts)
@@ -337,7 +408,7 @@ class Window(Adw.ApplicationWindow):
 
     @staticmethod
     def row_button(tip, cb):
-        b = Gtk.Button(icon_name="action-unavailable-symbolic" if tip == "Hide this" else "edit-undo-symbolic",
+        b = Gtk.Button(icon_name="action-unavailable-symbolic" if tip.startswith("Hide") else "edit-undo-symbolic",
                        tooltip_text=tip, valign=Gtk.Align.CENTER, css_classes=["flat"])
         b.connect("clicked", cb)
         return named(b, tip)
@@ -351,6 +422,7 @@ class Window(Adw.ApplicationWindow):
             row = Adw.ActionRow(title=GLib.markup_escape_text(t["source"]), subtitle=sub)
             if suffix: row.add_suffix(Gtk.Label(label=suffix, css_classes=["error" if worse else "dim-label"]))
             self.list.append(row)
+        self.empty.set_icon_name("emblem-ok-symbolic"); self.empty.set_child(None)
         self.empty.set_title("No app crashes"); self.empty.set_description("Nothing crashed in the last 30 days.")
         self.stack.set_visible_child_name("list" if rows else "empty")
 
@@ -365,6 +437,7 @@ class Window(Adw.ApplicationWindow):
             row.add_suffix(Gtk.Label(label=f"{r['avg']:.1f}/10" + ("" if d is None else f"  ({d:+.1f} vs previous)"),
                                      css_classes=["error" if r["worse"] else "dim-label"]))
             self.list.append(row)
+        self.empty.set_icon_name("dialog-information-symbolic"); self.empty.set_child(None)
         self.empty.set_title("No kernel data yet")
         self.empty.set_description("Needs at least one recorded boot with a known kernel.")
         self.stack.set_visible_child_name("list" if rows else "empty")
@@ -377,7 +450,8 @@ class Window(Adw.ApplicationWindow):
                                 subtitle_lines=2)
             row.add_suffix(self.row_button("Unmute", lambda _, f=fp: (unmute(self.db, f), self.reload())))
             self.list.append(row)
-        self.empty.set_title("Nothing muted"); self.empty.set_description("Use the hide button on an event to mute it.")
+        self.empty.set_icon_name("emblem-ok-symbolic"); self.empty.set_child(None)
+        self.empty.set_title("Nothing hidden"); self.empty.set_description("Hide noisy events with the button on each row. They stay here, so you can bring them back.")
         self.stack.set_visible_child_name("list" if rows else "empty")
 
 

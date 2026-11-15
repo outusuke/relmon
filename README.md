@@ -9,7 +9,8 @@ Works on any systemd distribution. No distro-specific code.
 ![relmon window](docs/screenshot.png)
 
 ## Features
-- Daily score chart, per-category and per-day filtering, search with "show more"
+- Daily score chart with legend and summary, per-category and per-day filtering (with a visible day banner), search with "show more", live counts per category
+- Undo toast when hiding an event; shortcuts: Ctrl+F filter, F5 / Ctrl+R refresh
 - Journal context (±30 s) for each event, copy as a Markdown bug report
 - Mute noisy events, per-app crash trends, per-kernel score comparison
 - Desktop notifications for new panics and crashes (background timer)

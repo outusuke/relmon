@@ -203,6 +203,34 @@ def list_events(db, cat="all", day_start=None, text="", limit=PAGE):
     return rows[:limit], len(rows) > limit
 
 
+def category_counts(db, day_start=None):
+    """{category: number of distinct (grouped) events} for the sidebar badges; muted events excluded.
+    day_start limits the count to one local day, like list_events()."""
+    q, args = f"SELECT category, COUNT(DISTINCT fingerprint) FROM events WHERE {NOT_MUTED}", []
+    if day_start is not None:
+        q += " AND ts>=? AND ts<?"; args += [day_start, day_start + 86400]
+    return dict(db.execute(q + " GROUP BY category", args).fetchall())
+
+
+def score_band(s):
+    """('Good'|'Fair'|'Poor'|'Off', css class) for a daily score; thresholds match score_rgb()."""
+    if s is None:
+        return "Off", "dim-label"
+    return ("Poor", "error") if s < 4 else ("Fair", "warning") if s < 7 else ("Good", "success")
+
+
+def chart_header(days, scores):
+    """(title, subtitle) shown above the chart: the average over the scored days and the worst day."""
+    got = [(scores[d], d) for d in days if scores.get(d) is not None]
+    if not got:
+        return "Reliability score", "No data yet"
+    avg = sum(s for s, _ in got) / len(got)
+    worst = min(got, key=lambda x: x[0])
+    return (f"Reliability score: {avg:.1f} / 10 average",
+            f"Last {len(days)} days. Worst day {worst[1]:%b} {worst[1].day} ({worst[0]:.1f}). "
+            "Click a bar to see that day's events.")
+
+
 def kernel_boots(db):
     """[(first_ts, last_ts, kernel)] for kernel_report()."""
     return db.execute("SELECT first_ts, last_ts, kernel FROM boots").fetchall()
