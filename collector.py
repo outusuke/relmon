@@ -3,7 +3,7 @@
 import fcntl, hashlib, json, os, platform, re, shlex, subprocess, sys, time
 from collections import namedtuple
 from datetime import datetime
-from core import report, connect, fingerprint, prune, retention_cutoff, new_alerts, classify, parse_failed, DB_PATH
+from core import report, connect, fingerprint, prune, retention_cutoff, new_alerts, classify, parse_failed, DB_PATH, RETENTION_DAYS
 
 LOCK_PATH = os.path.join(os.path.dirname(DB_PATH), "collect.lock")
 
@@ -167,7 +167,36 @@ def from_container(e):
     return bool(e.get("CONTAINER_NAME") or e.get("CONTAINER_ID"))
 
 
+def _src_msg(e):
+    msg = e.get("MESSAGE")
+    msg = msg if isinstance(msg, str) else str(msg)
+    return e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or e.get("_SYSTEMD_UNIT") or "unknown", msg
+
+
+def purge_containers(db):
+    """Once per database: delete container events that were recorded before from_container() skipped them.
+    The journal still knows which entries came from a container, so each row is matched exactly (time,
+    fingerprint, boot); nothing is guessed from names. If the journal cannot be read, it is retried next run."""
+    if db.execute("SELECT 1 FROM meta WHERE k='purged_containers'").fetchone():
+        return
+    out = _journal(["--since", f"{RETENTION_DAYS} days ago"])
+    if out is None:
+        return
+    for line in out.splitlines():
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if not from_container(e):
+            continue
+        src, msg = _src_msg(e)
+        db.execute("DELETE FROM events WHERE ts=? AND fingerprint=? AND boot_id=?",
+                   (int(e["__REALTIME_TIMESTAMP"]) / 1e6, fingerprint(src, msg), e.get("_BOOT_ID") or ""))
+    db.execute("INSERT OR REPLACE INTO meta VALUES('purged_containers','1')")
+
+
 def collect_journal(db):
+    purge_containers(db)
     cur = db.execute("SELECT v FROM meta WHERE k='cursor'").fetchone()
     out = _journal(["--after-cursor", cur[0]]) if cur else None
     if out is None:  # first run, or saved cursor is gone (journal rotated); duplicates are ignored by UNIQUE
@@ -183,9 +212,7 @@ def collect_journal(db):
         if from_container(e):
             last = e.get("__CURSOR", last)   # still move the cursor past it
             continue
-        msg = e.get("MESSAGE")
-        msg = msg if isinstance(msg, str) else str(msg)
-        src = e.get("SYSLOG_IDENTIFIER") or e.get("_COMM") or e.get("_SYSTEMD_UNIT") or "unknown"
+        src, msg = _src_msg(e)
         cat = classify(msg, e.get("_TRANSPORT"), "UNIT_RESULT" in e or "JOB_RESULT" in e)
         _add(db, int(e["__REALTIME_TIMESTAMP"]) / 1e6, cat, int(e.get("PRIORITY", 3)),
              src, msg, e.get("_BOOT_ID"), {k: v for k, v in e.items() if k.startswith(("_SYSTEMD", "_PID", "UNIT"))})
