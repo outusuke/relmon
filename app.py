@@ -174,8 +174,8 @@ class Window(Adw.ApplicationWindow):
     def reload(self):
         self.today = date.today()
         rows, boots = score_inputs(self.db)   # muted fingerprints already excluded
-        self.detail = {}   # per-day breakdown for the banner
-        self.scores = daily_scores(rows, boots, detail=self.detail)
+        self.day_info = {}   # per-day breakdown for the banner
+        self.scores = daily_scores(rows, boots, detail=self.day_info)
         self.days = sorted(self.scores)[-30:]
         self.kb = None if self.kb is None or self.kb >= len(self.days) else self.kb
         named(self.chart, chart_summary(self.days, self.scores))
@@ -307,7 +307,7 @@ class Window(Adw.ApplicationWindow):
                 else counts.get(key, 0) if key not in ("apps", "kernels") else 0
             lab.set_text(str(n) if n else "")
         self.banner.set_title(f"Showing {self.day:%A, %b} {self.day.day} only. "
-                              + explain_text(self.scores.get(self.day), self.detail.get(self.day)) if self.day else "")
+                              + explain_text(self.scores.get(self.day), self.day_info.get(self.day)) if self.day else "")
         self.banner.set_revealed(bool(self.day))
 
     def show_detail(self, fp, ts):
