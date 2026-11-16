@@ -48,6 +48,9 @@ RETENTION_DAYS = 90   # older events/boots are pruned
 # it no longer lowers the score and is listed separately instead. These categories never count as usual.
 USUAL_DAYS, USUAL_MIN = 7, 3
 NEVER_USUAL = frozenset({"panic", "unclean", "disk"})
+# A usual event stops being usual on a day when it fires at least SPIKE_MIN times and SPIKE_FACTOR times more than on its
+# busiest day of the previous USUAL_DAYS days: a chronic problem that suddenly gets much worse counts again.
+SPIKE_FACTOR, SPIKE_MIN = 5, 10
 
 
 def connect(path=DB_PATH):
@@ -379,21 +382,36 @@ def score_tooltip(d, s):
 
 
 def _usual_keys(day_keys, d):
-    """Keys that count as usual on day d: seen on >= USUAL_MIN of the USUAL_DAYS days before d.
-    day_keys: {date: {(category, key)}}. Today's own events are not part of the history they are judged against."""
-    seen = {}
+    """Keys that count as usual on day d: seen on >= USUAL_MIN of the USUAL_DAYS days before d, unless they spike on d.
+    day_keys: {date: {(category, key): events that day}} (a plain set of keys per day also works, without the spike check).
+    Returns {key: days seen}. Day d's own events are not part of the history they are judged against."""
+    seen, busiest = {}, {}
     for i in range(1, USUAL_DAYS + 1):
-        for ck in day_keys.get(d - timedelta(days=i), ()):
+        day = day_keys.get(d - timedelta(days=i), ())
+        for ck in day:
             seen[ck] = seen.get(ck, 0) + 1
-    return {ck: n for ck, n in seen.items() if n >= USUAL_MIN and ck[0] not in NEVER_USUAL}
+            if isinstance(day, dict):
+                busiest[ck] = max(busiest.get(ck, 0), day[ck])
+    now = day_keys.get(d)
+    out = {}
+    for ck, n in seen.items():
+        if n < USUAL_MIN or ck[0] in NEVER_USUAL:
+            continue
+        if isinstance(now, dict) and now.get(ck, 0) >= max(SPIKE_MIN, SPIKE_FACTOR * busiest.get(ck, 0)):
+            continue
+        out[ck] = n
+    return out
 
 
-def daily_scores(events, boots=None, today=None):
+def daily_scores(events, boots=None, today=None, detail=None):
     """events: iterable of (ts, category, source) or (ts, category, source, fingerprint). Returns {date: score 1..10}.
     Each day is judged against the machine's own recent history: an event (fingerprint, else source) that appeared on
-    USUAL_MIN or more of the previous USUAL_DAYS days is usual and costs nothing (see NEVER_USUAL for exceptions).
+    USUAL_MIN or more of the previous USUAL_DAYS days is usual and costs nothing, unless it spikes that day (see
+    SPIKE_FACTOR) or is in NEVER_USUAL.
     boots: optional [(first_ts, last_ts)]; days with no boot and no events become None (gap).
-    Other days without events count as 10."""
+    Other days without events count as 10.
+    detail: optional dict, filled with {date: {"penalty": {category: (raw, capped)}, "counted": {(category, source): n},
+    "usual": {(category, source): n}}} so a day's score can be explained with explain_text()."""
     today = today or date.today()
     evs = []   # (day, category, source, key)
     first = today
@@ -413,21 +431,28 @@ def daily_scores(events, boots=None, today=None):
         evs.append((d, cat, src, fp[0] if fp and fp[0] else f"{src}|{cat}"))
     day_keys = {}
     for d, cat, _, key in evs:
-        day_keys.setdefault(d, set()).add((cat, key))
+        c = day_keys.setdefault(d, {})
+        c[(cat, key)] = c.get((cat, key), 0) + 1
     usual = {}   # day -> usual keys, computed once per day that has events
-    per = {}  # (day, source, category) -> number of events that still count
+    per, skipped = {}, {}  # (day, source, category) -> number of events that count / that were usual
     for d, cat, src, key in evs:
         if d not in usual:
             usual[d] = _usual_keys(day_keys, d)
-        if (cat, key) in usual[d]:
-            continue
-        per[(d, src, cat)] = per.get((d, src, cat), 0) + 1
+        tgt = skipped if (cat, key) in usual[d] else per
+        tgt[(d, src, cat)] = tgt.get((d, src, cat), 0) + 1
     by_cat = {}  # (day, category) -> summed penalty, capped below
     for (d, _, cat), n in per.items():
         by_cat[(d, cat)] = by_cat.get((d, cat), 0) + WEIGHTS.get(cat, 0.3) * min(REPEAT_CAP, 1 + math.log10(n))
     totals = {}
     for (d, cat), v in by_cat.items():
-        totals[d] = totals.get(d, 0) + min(v, CATEGORY_CAP.get(cat, v))
+        capped = min(v, CATEGORY_CAP.get(cat, v))
+        totals[d] = totals.get(d, 0) + capped
+        if detail is not None:
+            detail.setdefault(d, {"penalty": {}, "counted": {}, "usual": {}})["penalty"][cat] = (v, capped)
+    if detail is not None:
+        for name, src_map in (("counted", per), ("usual", skipped)):
+            for (d, src, cat), n in src_map.items():
+                detail.setdefault(d, {"penalty": {}, "counted": {}, "usual": {}})[name][(cat, src)] = n
     out, d = {}, first
     while d <= today:
         gap = active is not None and d not in active
@@ -436,27 +461,46 @@ def daily_scores(events, boots=None, today=None):
     return out
 
 
+def explain_text(score, info):
+    """One line saying where a day's score came from. score: the day's score (None = machine off); info: that day's entry
+    of daily_scores(detail=...), or None if the day had no events."""
+    if score is None:
+        return "machine was off"
+    info = info or {"penalty": {}, "counted": {}, "usual": {}}
+    parts = []
+    for cat, (raw, capped) in sorted(info["penalty"].items(), key=lambda x: -x[1][1]):
+        if capped >= 0.05:
+            parts.append(f"{cat} {capped:.1f}" + (f" (capped, was {raw:.1f})" if raw > capped + 0.05 else ""))
+    usual = len({src for _, src in info["usual"]})
+    text = f"score {score:.1f}: " + (", ".join(parts) if parts else "nothing counted")
+    if usual:
+        text += f". {usual} usual source{'s' if usual != 1 else ''} not counted"
+    return text
+
+
 def usual_events(db, today=None):
     """The events the score currently treats as usual (seen on >= USUAL_MIN of the last USUAL_DAYS days before today,
-    and not in NEVER_USUAL): [dict(category, source, message, days, count, last, fingerprint)], most frequent first.
-    days = how many of those days it appeared on. Muted events are excluded (they are hidden anyway)."""
+    not in NEVER_USUAL, and not spiking today): [dict(category, source, message, days, count, last, fingerprint)],
+    most frequent first. days = how many of those days it appeared on; count/last cover those days only.
+    Muted events are excluded (they are hidden anyway)."""
     today = today or date.today()
-    t0 = datetime.combine(today - timedelta(days=USUAL_DAYS), datetime.min.time()).timestamp()
-    t1 = datetime.combine(today, datetime.min.time()).timestamp()
+    start = datetime.combine(today, datetime.min.time())
+    t0, t1, t2 = ((start + timedelta(days=n)).timestamp() for n in (-USUAL_DAYS, 0, 1))
     rows = db.execute(f"SELECT ts,category,source,message,fingerprint FROM events WHERE ts>=? AND ts<? AND {NOT_MUTED}",
-                      (t0, t1)).fetchall()
+                      (t0, t2)).fetchall()
     day_keys, info = {}, {}
     for ts, cat, src, msg, fp in rows:
         d = datetime.fromtimestamp(ts).date()
         ck = (cat, fp)
-        day_keys.setdefault(d, set()).add(ck)
+        c = day_keys.setdefault(d, {})
+        c[ck] = c.get(ck, 0) + 1
+        if ts >= t1:
+            continue   # today only matters for the spike check
         i = info.setdefault(ck, dict(category=cat, source=src, message=msg, count=0, last=ts, fingerprint=fp))
         i["count"] += 1
         if ts >= i["last"]:
             i["last"], i["message"] = ts, msg
-    out = []
-    for ck, n in _usual_keys(day_keys, today).items():
-        out.append(dict(info[ck], days=n))
+    out = [dict(info[ck], days=n) for ck, n in _usual_keys(day_keys, today).items()]
     return sorted(out, key=lambda u: (-u["days"], -u["count"], u["source"] or ""))
 
 

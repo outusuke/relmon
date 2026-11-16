@@ -10,7 +10,7 @@ from datetime import date, datetime
 from gi.repository import Adw, Gtk, GLib, Gdk, PangoCairo
 from core import (connect, daily_scores, score_inputs, mute, unmute, muted_rows, event_detail, event_markdown,
                   boot_label, bar_index, label_step, day_label, score_tooltip, kernel_report, kernel_boots, list_events, PAGE, app_trends, trend_line,
-                  score_rgb, step_index, chart_summary, category_counts, chart_header, usual_events, USUAL_DAYS)
+                  score_rgb, step_index, chart_summary, category_counts, chart_header, usual_events, USUAL_DAYS, explain_text)
 
 # sidebar sections: event filters, read-only insights, and the mute list
 GROUPS = {"all": "Events", "apps": "Insights", "muted": "Manage"}
@@ -174,7 +174,8 @@ class Window(Adw.ApplicationWindow):
     def reload(self):
         self.today = date.today()
         rows, boots = score_inputs(self.db)   # muted fingerprints already excluded
-        self.scores = daily_scores(rows, boots)
+        self.detail = {}   # per-day breakdown for the banner
+        self.scores = daily_scores(rows, boots, detail=self.detail)
         self.days = sorted(self.scores)[-30:]
         self.kb = None if self.kb is None or self.kb >= len(self.days) else self.kb
         named(self.chart, chart_summary(self.days, self.scores))
@@ -305,7 +306,8 @@ class Window(Adw.ApplicationWindow):
                 else len(usual_events(self.db)) if key == "usual" \
                 else counts.get(key, 0) if key not in ("apps", "kernels") else 0
             lab.set_text(str(n) if n else "")
-        self.banner.set_title(f"Showing {self.day:%A, %b} {self.day.day} only" if self.day else "")
+        self.banner.set_title(f"Showing {self.day:%A, %b} {self.day.day} only. "
+                              + explain_text(self.scores.get(self.day), self.detail.get(self.day)) if self.day else "")
         self.banner.set_revealed(bool(self.day))
 
     def show_detail(self, fp, ts):
