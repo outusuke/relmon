@@ -480,7 +480,7 @@ class Window(Adw.ApplicationWindow):
 
 class App(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="io.github.example.RelMon")
+        super().__init__(application_id="io.github.outusuke.RelMon")
         self.connect("activate", lambda a: Window(a).present())
 
 

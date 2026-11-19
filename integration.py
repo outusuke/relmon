@@ -4,7 +4,7 @@ Units/launcher are generated for the copy of the app that is running, so no inst
 import os, shutil, subprocess, sys
 
 UNIT = "relmon-collector"
-DESKTOP = "io.github.example.RelMon.desktop"
+DESKTOP = "io.github.outusuke.RelMon.desktop"
 HERE = os.path.dirname(os.path.abspath(__file__))
 FILES = ("app.py", "collector.py", "core.py", "integration.py")   # what the installed copy needs
 
